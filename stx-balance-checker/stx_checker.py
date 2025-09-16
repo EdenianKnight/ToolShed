@@ -200,9 +200,88 @@ class STXBalanceChecker:
             
             data = response.json()
             
-            # Extract balance information
-            balance_ustx = int(data['balance']['stx']['balance'])
-            locked_ustx = int(data['balance']['stx'].get('locked', 0))
+            # Debug: Print the response structure for troubleshooting
+            # Uncomment the next line if you need to debug API responses
+            # print(f"DEBUG - API Response for {address}: {json.dumps(data, indent=2)}")
+            
+            # Check if the response has the expected structure
+            if not isinstance(data, dict):
+                return {
+                    'name': name or 'Unknown',
+                    'address': address,
+                    'error': f"Invalid API response format: expected dict, got {type(data)}",
+                    'success': False
+                }
+            
+            # Handle different response formats
+            if 'balance' not in data:
+                return {
+                    'name': name or 'Unknown',
+                    'address': address,
+                    'error': "No balance information found in API response",
+                    'success': False
+                }
+            
+            balance_info = data['balance']
+            
+            # Handle case where balance is a string (hex value) instead of dict
+            if isinstance(balance_info, str):
+                # Check if it's a hex value (balance in µSTX)
+                if balance_info.startswith('0x'):
+                    try:
+                        # Convert hex to integer (µSTX)
+                        balance_ustx = int(balance_info, 16)
+                        balance_stx = balance_ustx / 1_000_000
+                        
+                        return {
+                            'name': name or 'Unknown',
+                            'address': address,
+                            'balance_stx': balance_stx,
+                            'locked_stx': 0.0,  # No locked info available in this format
+                            'total_stx': balance_stx,
+                            'balance_ustx': balance_ustx,
+                            'locked_ustx': 0,
+                            'nonce': data.get('nonce', 0),
+                            'success': True
+                        }
+                    except ValueError:
+                        return {
+                            'name': name or 'Unknown',
+                            'address': address,
+                            'error': f"Invalid hex balance format: {balance_info}",
+                            'success': False
+                        }
+                else:
+                    return {
+                        'name': name or 'Unknown',
+                        'address': address,
+                        'error': f"API returned error: {balance_info}",
+                        'success': False
+                    }
+            
+            # Check if STX balance information exists
+            if not isinstance(balance_info, dict) or 'stx' not in balance_info:
+                return {
+                    'name': name or 'Unknown',
+                    'address': address,
+                    'error': "No STX balance information found",
+                    'success': False
+                }
+            
+            stx_info = balance_info['stx']
+            
+            # Handle case where stx info is also a string
+            if isinstance(stx_info, str):
+                return {
+                    'name': name or 'Unknown',
+                    'address': address,
+                    'error': f"STX info error: {stx_info}",
+                    'success': False
+                }
+            
+            # Extract balance information with safe defaults
+            balance_ustx = int(stx_info.get('balance', 0))
+            locked_ustx = int(stx_info.get('locked', 0))
             
             balance_stx = balance_ustx / 1_000_000
             locked_stx = locked_ustx / 1_000_000
@@ -220,10 +299,18 @@ class STXBalanceChecker:
             }
             
         except requests.exceptions.HTTPError as err:
+            # Handle specific HTTP errors
+            if response.status_code == 404:
+                error_msg = "Wallet address not found or invalid"
+            elif response.status_code == 429:
+                error_msg = "Rate limit exceeded. Try increasing delay between requests"
+            else:
+                error_msg = f"HTTP Error {response.status_code}: {err}"
+                
             return {
                 'name': name or 'Unknown',
                 'address': address,
-                'error': f"HTTP Error: {err}",
+                'error': error_msg,
                 'success': False
             }
         except requests.exceptions.RequestException as err:
@@ -233,7 +320,7 @@ class STXBalanceChecker:
                 'error': f"Network Error: {err}",
                 'success': False
             }
-        except (KeyError, ValueError) as err:
+        except (KeyError, ValueError, TypeError) as err:
             return {
                 'name': name or 'Unknown',
                 'address': address,
@@ -241,13 +328,14 @@ class STXBalanceChecker:
                 'success': False
             }
     
-    def check_wallets_from_list(self, wallets: List[Dict[str, str]], delay: float = 0.1) -> List[Dict]:
+    def check_wallets_from_list(self, wallets: List[Dict[str, str]], delay: float = 0.1, debug_mode: bool = False) -> List[Dict]:
         """
         Check balances for wallets from loaded list
         
         Args:
             wallets: List of wallet dictionaries with 'name' and 'address'
             delay: Delay between requests in seconds
+            debug_mode: Enable debug output for failed requests
             
         Returns:
             List of balance dictionaries
@@ -255,10 +343,28 @@ class STXBalanceChecker:
         results = []
         
         print(f"🔍 Checking balances for {len(wallets)} wallets...")
+        if debug_mode:
+            print("🐛 Debug mode enabled - will show detailed errors")
         
         for i, wallet in enumerate(wallets):
             print(f"   Checking {i+1}/{len(wallets)}: {wallet['name']}")
             result = self.get_balance(wallet['address'], wallet['name'])
+            
+            # Debug output for failed requests
+            if debug_mode and not result['success']:
+                print(f"     ⚠️  Failed: {result['error']}")
+                print(f"     📍 Address: {result['address']}")
+                
+                # Try to get raw API response for debugging
+                try:
+                    url = f"{self.base_url}{wallet['address']}"
+                    response = self.session.get(url, timeout=5)
+                    print(f"     📡 Status: {response.status_code}")
+                    if response.status_code != 200:
+                        print(f"     📄 Response: {response.text[:200]}...")
+                except Exception as debug_error:
+                    print(f"     🔧 Debug error: {debug_error}")
+            
             results.append(result)
             
             # Add delay between requests (except for the last one)
@@ -356,8 +462,9 @@ def main():
     print("2. Google Sheets (public)")
     print("3. CSV file")
     print("4. Manual input (hardcoded addresses)")
+    print("5. Debug mode (test single address)")
     
-    choice = input("\nEnter your choice (1-4): ").strip()
+    choice = input("\nEnter your choice (1-5): ").strip()
     
     wallets = []
     
@@ -384,6 +491,38 @@ def main():
         ]
         print(f"✅ Using {len(wallets)} hardcoded wallet addresses")
     
+    elif choice == '5':
+        # Debug mode - test single address with full API response
+        test_address = input("Enter wallet address to debug: ").strip()
+        if not test_address:
+            test_address = "SP1J8ff7N441J2p29F12C0ZA4GDE85X4QY8DRS1X6"  # Default test address
+        
+        print(f"\n🔍 Debug mode: Testing address {test_address}")
+        
+        try:
+            url = f"{checker.base_url}{test_address}"
+            print(f"📡 API URL: {url}")
+            
+            response = checker.session.get(url, timeout=10)
+            print(f"📊 Response Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"📋 Full API Response:")
+                print(json.dumps(data, indent=2))
+                
+                # Test our parsing logic
+                result = checker.get_balance(test_address, "Debug Test")
+                print(f"\n✅ Parsed Result:")
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"❌ Error: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            print(f"❌ Debug error: {e}")
+        
+        return
+    
     else:
         print("❌ Invalid choice")
         return
@@ -392,8 +531,12 @@ def main():
         print("❌ No wallets loaded. Exiting.")
         return
     
+    # Ask about debug mode for problematic addresses
+    debug_choice = input(f"\nFound {len(wallets)} wallets. Enable debug output for failed addresses? (y/n): ").strip().lower()
+    debug_mode = debug_choice in ['y', 'yes']
+    
     # Check balances
-    results = checker.check_wallets_from_list(wallets, delay=0.1)
+    results = checker.check_wallets_from_list(wallets, delay=0.1, debug_mode=debug_mode)
     
     # Display results
     checker.print_results(results)
@@ -408,4 +551,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
